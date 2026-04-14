@@ -1,7 +1,7 @@
 # Thunderbird SUMO KB Issues
 
 
-**NB: For SUMO KB articles for Firefox and all other Mozilla Corporation products, please use Bugzilla after reading **[How to submit a SUMO Knowledge Base content request](https://support.mozilla.org/en-US/kb/submit-sumo-knowledge-base-content-request)**. NOT this repo. **
+**NB: For SUMO KB articles for Firefox and all other Mozilla Corporation products, please use Bugzilla** after reading **[How to submit a SUMO Knowledge Base content request](https://support.mozilla.org/en-US/kb/submit-sumo-knowledge-base-content-request)**. NOT this repo. **
 
 * This repo is for tracking Thunderbird Desktop support.mozilla.org (SUMO) Knowledge Base (KB) issues not for developing software code.
 * We require all those who participate in this repo to agree and adhere to the [Mozilla Community Participation Guidelines](https://www.mozilla.org/about/governance/policies/participation/) 
