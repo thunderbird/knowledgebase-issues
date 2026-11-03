@@ -35,12 +35,13 @@ SELECT substr(MAX(reviewed_date), 1, 10) AS last_approved,
        article_url
 FROM revisions
 WHERE status = 'approved' AND substr(reviewed_date, 1, 10) >= ?
+  AND creator_url LIKE ?
 GROUP BY article_slug
 """
 # In SQLite, the bare columns in a query with MAX() come from the row with
 # the maximum value. So the title is the title of the last approved revision.
 
-SORT_SCRIPT = """<script>
+SORT_SCRIPT = r"""<script>
 // Click a column heading to sort the table. Google Docs does not keep this.
 document.querySelectorAll('th').forEach((th, col) => {
   th.style.cursor = 'pointer';
@@ -49,16 +50,21 @@ document.querySelectorAll('th').forEach((th, col) => {
     const asc = th.dataset.asc !== 'true';
     th.dataset.asc = asc;
     [...body.rows]
-      .sort((a, b) => a.cells[col].innerText.localeCompare(b.cells[col].innerText) * (asc ? 1 : -1))
+      .sort((a, b) => {
+        const x = a.cells[col].innerText, y = b.cells[col].innerText;
+        const nx = parseFloat(x), ny = parseFloat(y);
+        const c = (!isNaN(nx) && !isNaN(ny) && /^[\d.]+$/.test(x + y)) ? nx - ny : x.localeCompare(y);
+        return c * (asc ? 1 : -1);
+      })
       .forEach(r => body.appendChild(r));
   });
 });
 </script>"""
 
 
-def load_rows(db_path: str, since: str, sort: str) -> list[tuple[str, str, str]]:
+def load_rows(db_path: str, user: str, since: str, sort: str) -> list[tuple[str, str, str]]:
     db = sqlite3.connect(db_path)
-    rows = db.execute(QUERY, (since,)).fetchall()
+    rows = db.execute(QUERY, (since, f"%/user/{user}/")).fetchall()
     if sort == "title":
         rows.sort(key=lambda r: r[1].casefold())
     else:
@@ -72,9 +78,9 @@ def markdown_escape(text: str) -> str:
     return text
 
 
-def to_markdown(rows, since: str) -> str:
+def to_markdown(rows, user: str, since: str) -> str:
     lines = [
-        f"# KB articles with approved revisions since {since}",
+        f"# KB articles with approved revisions by {user} since {since}",
         "",
         "| Date | Article |",
         "| --- | --- |",
@@ -85,13 +91,13 @@ def to_markdown(rows, since: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def to_html(rows, since: str) -> str:
+def to_html(rows, user: str, since: str) -> str:
     body = "\n".join(
         f'    <tr><td>{html.escape(day)}</td>'
         f'<td><a href="{html.escape(url)}">{html.escape(title)}</a></td></tr>'
         for day, title, url in rows
     )
-    title = f"KB articles with approved revisions since {since}"
+    title = f"KB articles with approved revisions by {user} since {since}"
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -125,6 +131,8 @@ def main() -> None:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--db", default="kb_revisions.sqlite",
                         help="SQLite database file (default: %(default)s)")
+    parser.add_argument("--user", default="rtanglao",
+                        help="SUMO user name whose revisions to list (default: %(default)s)")
     parser.add_argument("--since", default="2026-06-01", metavar="YYYY-MM-DD",
                         help="first approval date to include (default: %(default)s)")
     parser.add_argument("--sort", choices=["date", "title"], default="date",
@@ -137,13 +145,13 @@ def main() -> None:
     if not Path(args.db).exists():
         sys.exit(f"{args.db} does not exist. Run kb_revisions.py scrape first.")
 
-    rows = load_rows(args.db, args.since, args.sort)
+    rows = load_rows(args.db, args.user, args.since, args.sort)
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    md_path = out / f"approved_since_{args.since}.md"
-    html_path = out / f"approved_since_{args.since}.html"
-    md_path.write_text(to_markdown(rows, args.since), encoding="utf-8")
-    html_path.write_text(to_html(rows, args.since), encoding="utf-8")
+    md_path = out / f"{args.user}_approved_since_{args.since}.md"
+    html_path = out / f"{args.user}_approved_since_{args.since}.html"
+    md_path.write_text(to_markdown(rows, args.user, args.since), encoding="utf-8")
+    html_path.write_text(to_html(rows, args.user, args.since), encoding="utf-8")
     print(f"{len(rows)} articles. Wrote {md_path} and {html_path}.", file=sys.stderr)
 
 
