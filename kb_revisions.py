@@ -8,6 +8,7 @@ See https://github.com/thunderbird/knowledgebase-issues/issues/252
 
 Examples:
     uv run kb_revisions.py scrape --user rtanglao --locale en-US
+    uv run kb_revisions.py history --since 2026-06-01
     uv run kb_revisions.py report --approved-since 2026-06-01
 
 Before the first run, install the browser:
@@ -30,8 +31,7 @@ from playwright.sync_api import Page, TimeoutError as PlaywrightTimeout, sync_pl
 BASE_URL = "https://support.mozilla.org"
 PAGE_TIMEOUT_MS = 60_000
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS revisions (
+COLUMNS = """
     revision_id              INTEGER PRIMARY KEY,
     locale                   TEXT,
     article_slug             TEXT,
@@ -55,11 +55,22 @@ CREATE TABLE IF NOT EXISTS revisions (
     source                   TEXT,
     content_html             TEXT,
     info_json                TEXT,
-    scraped_at               TEXT
+    scraped_at               TEXT"""
+
+# revisions: the revisions of one user, from the revisions list.
+# article_revisions: every revision, by every editor, of the articles that
+# the history command reads. "significance" comes from the history page.
+SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS revisions ({COLUMNS}
 );
 CREATE INDEX IF NOT EXISTS idx_revisions_status_reviewed
     ON revisions (status, reviewed_date);
 CREATE INDEX IF NOT EXISTS idx_revisions_article ON revisions (article_slug);
+CREATE TABLE IF NOT EXISTS article_revisions ({COLUMNS},
+    significance             TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_article_revisions_article
+    ON article_revisions (article_slug, created);
 """
 
 # JavaScript that reads one page of the revisions list.
@@ -81,6 +92,18 @@ LIST_JS = """
   const next = document.querySelector('.pagination li.next a');
   return {items, next: next ? next.href : null};
 }
+"""
+
+# JavaScript that reads the history page of one article. The rows are
+# newest first, and the page has no pagination.
+HISTORY_JS = """
+() => [...document.querySelectorAll('#revision-list tr[id^="rev-list-"]')].map(tr => {
+  const a = tr.querySelector('td.date a');
+  return {
+    revision_url: a ? a.href : null,
+    significance: (tr.querySelector('td.significance') || {}).textContent?.trim() || '',
+  };
+}).filter(r => r.revision_url)
 """
 
 # JavaScript that reads one revision page. It keeps every item in the
@@ -196,12 +219,12 @@ def parse_revision(data: dict, list_item: dict) -> dict:
     return row
 
 
-def save(db: sqlite3.Connection, row: dict) -> None:
+def save(db: sqlite3.Connection, row: dict, table: str = "revisions") -> None:
     columns = list(row)
     placeholders = ", ".join("?" for _ in columns)
     updates = ", ".join(f"{c} = excluded.{c}" for c in columns if c != "revision_id")
     db.execute(
-        f"INSERT INTO revisions ({', '.join(columns)}) VALUES ({placeholders}) "
+        f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders}) "
         f"ON CONFLICT(revision_id) DO UPDATE SET {updates}",
         [row[c] for c in columns],
     )
@@ -279,6 +302,92 @@ def scrape(args: argparse.Namespace) -> None:
     print(f"Saved {added} revisions to {args.db}.", file=sys.stderr)
 
 
+def history(args: argparse.Namespace) -> None:
+    """Save every revision of each article that the user touched since a date."""
+    db = sqlite3.connect(args.db)
+    db.executescript(SCHEMA)
+    articles = db.execute(
+        """
+        SELECT article_slug, MAX(article_title), MAX(article_url), MAX(locale)
+        FROM revisions
+        WHERE substr(created, 1, 10) >= ? AND creator_url LIKE ?
+        GROUP BY article_slug ORDER BY article_slug
+        """,
+        (args.since, f"%/user/{args.user}/"),
+    ).fetchall()
+    print(f"{len(articles)} articles with a revision by {args.user} since {args.since}.",
+          file=sys.stderr)
+    if not articles:
+        print(f"Run 'scrape --user {args.user}' first.", file=sys.stderr)
+
+    have = {r[0] for r in db.execute("SELECT revision_id FROM article_revisions")}
+    mine = {r[0] for r in db.execute("SELECT revision_id FROM revisions")}
+    column_names = [c.split()[0] for c in COLUMNS.strip().split(",\n")]
+
+    added = 0
+    with sync_playwright() as p:
+        context = p.chromium.launch_persistent_context(
+            args.profile_dir, headless=not args.headed)
+        page = context.pages[0] if context.pages else context.new_page()
+        print("If the browser shows a challenge, complete it in the window.", file=sys.stderr)
+        for number, (slug, title, article_url, locale) in enumerate(articles, 1):
+            locale = locale or "en-US"
+            url = f"{BASE_URL}/{locale}/kb/{slug}/history"
+            print(f"Article {number}/{len(articles)}: {title}", file=sys.stderr)
+            try:
+                wait_for(page, url, "#revision-list",
+                         args.challenge_timeout * 1000 if number == 1 else PAGE_TIMEOUT_MS)
+            except PlaywrightTimeout:
+                print(f"  Timeout, skipped: {url}", file=sys.stderr)
+                continue
+            rows = page.evaluate(HISTORY_JS)
+
+            for i, hist in enumerate(rows):
+                rev_id = revision_id_from_url(hist["revision_url"])
+                older = rows[i + 1]["revision_url"] if i + 1 < len(rows) else None
+                previous = revision_id_from_url(older) if older else None
+                if rev_id in have and not args.refresh:
+                    db.execute("UPDATE article_revisions SET significance = ? "
+                               "WHERE revision_id = ?", (hist["significance"], rev_id))
+                    continue
+                if rev_id in mine and not args.refresh:
+                    # Copy the saved row. No download is necessary.
+                    cols = ", ".join(column_names)
+                    db.execute(
+                        f"INSERT OR REPLACE INTO article_revisions ({cols}, significance) "
+                        f"SELECT {cols}, ? FROM revisions WHERE revision_id = ?",
+                        (hist["significance"], rev_id))
+                    db.execute("UPDATE article_revisions SET previous_revision_id = ? "
+                               "WHERE revision_id = ?", (previous, rev_id))
+                    db.commit()
+                    have.add(rev_id)
+                    continue
+                time.sleep(args.delay)
+                rev_url = urljoin(BASE_URL, hist["revision_url"])
+                try:
+                    wait_for(page, rev_url, ".revision-info")
+                except PlaywrightTimeout:
+                    print(f"  Timeout, skipped: {rev_url}", file=sys.stderr)
+                    continue
+                item = {"revision_url": rev_url, "article_title": title,
+                        "article_url": article_url, "locale": locale}
+                row = parse_revision(page.evaluate(REVISION_JS), item)
+                row["previous_revision_id"] = previous
+                row["significance"] = hist["significance"]
+                save(db, row, "article_revisions")
+                have.add(rev_id)
+                added += 1
+                print(f"  Saved {rev_id} by {row.get('creator_name')} ({row['status']})",
+                      file=sys.stderr)
+            db.commit()
+            time.sleep(args.delay)
+        context.close()
+
+    total = db.execute("SELECT COUNT(*) FROM article_revisions").fetchone()[0]
+    print(f"Downloaded {added} revisions. article_revisions has {total} rows.",
+          file=sys.stderr)
+
+
 def report(args: argparse.Namespace) -> None:
     db = sqlite3.connect(args.db)
     rows = db.execute(
@@ -287,10 +396,11 @@ def report(args: argparse.Namespace) -> None:
                MAX(reviewed_date) AS last_approved
         FROM revisions
         WHERE status = 'approved' AND substr(reviewed_date, 1, 10) >= ?
+          AND creator_url LIKE ?
         GROUP BY article_slug
         ORDER BY article_title COLLATE NOCASE
         """,
-        (args.approved_since,),
+        (args.approved_since, f"%/user/{args.user}/"),
     ).fetchall()
     for title, url, count, last in rows:
         print(f"{title}\t{url}\t{count}\t{last[:10]}")
@@ -323,7 +433,25 @@ def main() -> None:
                    help="seconds to wait on the first page for the challenge (default: %(default)s)")
     s.set_defaults(func=scrape)
 
+    h = sub.add_parser("history", help="save every revision of the articles you touched")
+    h.add_argument("--user", default="rtanglao", help="SUMO user name (default: %(default)s)")
+    h.add_argument("--since", default="2026-06-01", metavar="YYYY-MM-DD",
+                   help="articles with one of your revisions on or after this date "
+                        "(default: %(default)s)")
+    h.add_argument("--delay", type=float, default=2.0,
+                   help="seconds to wait between page loads (default: %(default)s)")
+    h.add_argument("--refresh", action="store_true",
+                   help="download revisions again, also if they are already saved")
+    h.add_argument("--headed", action="store_true", help="show the browser window")
+    h.add_argument("--profile-dir", default=".kb_revisions_browser",
+                   help="browser profile folder that keeps cookies (default: %(default)s)")
+    h.add_argument("--challenge-timeout", type=int, default=300,
+                   help="seconds to wait on the first page for the challenge "
+                        "(default: %(default)s)")
+    h.set_defaults(func=history)
+
     r = sub.add_parser("report", help="list articles with approved revisions")
+    r.add_argument("--user", default="rtanglao", help="SUMO user name (default: %(default)s)")
     r.add_argument("--approved-since", required=True, metavar="YYYY-MM-DD",
                    help="first review date to include")
     r.set_defaults(func=report)

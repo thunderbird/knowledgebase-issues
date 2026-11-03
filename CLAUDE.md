@@ -43,8 +43,19 @@ Use the `gh` CLI for issue operations, for example `gh issue list` and `gh issue
 
 ## kb_approved_report.py
 
-`kb_approved_report.py` reads `kb_revisions.sqlite` and writes the approved-articles report for issue #254. It has no dependencies. The output goes to `reports/`, and the reports are public in Git.
+`kb_approved_report.py` reads `kb_revisions.sqlite` and writes the approved-articles report for issue #254. It has no dependencies. The output goes to `reports/`, and the reports are public in Git. All three commands take `--user`, and the report file names start with the user name.
 
 ```
 uv run kb_approved_report.py --since 2026-06-01 --sort date
 ```
+
+## kb_changed_report.py
+
+`kb_changed_report.py` lists the articles that a user changed since a date, with the percent of words changed (issue #257). It reads the `article_revisions` table, which `kb_revisions.py history` fills with every revision, by every editor, of the articles that the user touched.
+
+```
+uv run kb_revisions.py history --user rtanglao --since 2026-06-01 --headed
+uv run kb_changed_report.py --user rtanglao --since 2026-06-01 --threshold 20
+```
+
+Back-to-back revisions by the user count as one edit. The script compares each group with the last approved revision before it. It skips templates, redirect pages, and locales other than en-US. `kb_changed_report.py` imports `SORT_SCRIPT` and `markdown_escape` from `kb_approved_report.py`.

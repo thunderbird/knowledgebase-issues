@@ -1,2 +1,3 @@
 kb_revisions.sqlite
 .kb_revisions_browser/
+.playwright-mcp/
