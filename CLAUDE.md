@@ -40,3 +40,11 @@ All participants must follow the [Mozilla Community Participation Guidelines](ht
 ## Working in this repository
 
 Use the `gh` CLI for issue operations, for example `gh issue list` and `gh issue view <number>`.
+
+## kb_approved_report.py
+
+`kb_approved_report.py` reads `kb_revisions.sqlite` and writes the approved-articles report for issue #254. It has no dependencies. The output goes to `reports/`, which Git ignores.
+
+```
+uv run kb_approved_report.py --since 2026-06-01 --sort date
+```
