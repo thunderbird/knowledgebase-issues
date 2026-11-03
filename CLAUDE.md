@@ -59,3 +59,5 @@ uv run kb_changed_report.py --user rtanglao --since 2026-06-01 --threshold 20
 ```
 
 Back-to-back revisions by the user count as one edit. The script compares each group with the last approved revision before it. It skips templates, redirect pages, and locales other than en-US. `kb_changed_report.py` imports `SORT_SCRIPT` and `markdown_escape` from `kb_approved_report.py`.
+
+The filtered reports use `--exclude-created` (`none`, `all`, `since`, or `since-or-minor`), `--exclude SLUG`, and `--suffix`. Example: `uv run kb_changed_report.py --exclude-created since-or-minor --exclude new-thunderbird-desktop --exclude new-thunderbird-android --suffix filtered_with_older`.
