@@ -43,7 +43,7 @@ Use the `gh` CLI for issue operations, for example `gh issue list` and `gh issue
 
 ## kb_approved_report.py
 
-`kb_approved_report.py` reads `kb_revisions.sqlite` and writes the approved-articles report for issue #254. It has no dependencies. The output goes to `reports/`, which Git ignores.
+`kb_approved_report.py` reads `kb_revisions.sqlite` and writes the approved-articles report for issue #254. It has no dependencies. The output goes to `reports/`, and the reports are public in Git.
 
 ```
 uv run kb_approved_report.py --since 2026-06-01 --sort date
