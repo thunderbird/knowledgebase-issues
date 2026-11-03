@@ -10,6 +10,8 @@ Examples:
     uv run kb_revisions.py scrape --user rtanglao --locale en-US
     uv run kb_revisions.py history --since 2026-06-01
     uv run kb_revisions.py report --approved-since 2026-06-01
+    uv run kb_revisions.py export     # write kb_revisions.sql for Git
+    uv run kb_revisions.py import     # make kb_revisions.sqlite from it
 
 Before the first run, install the browser:
     uv run --with playwright playwright install chromium
@@ -24,6 +26,7 @@ import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeout, sync_playwright
@@ -388,6 +391,52 @@ def history(args: argparse.Namespace) -> None:
           file=sys.stderr)
 
 
+TABLES = ("revisions", "article_revisions")
+
+
+def export(args: argparse.Namespace) -> None:
+    """Write the database as SQL text, one INSERT per row, in revision_id order.
+
+    Git stores text changes as small deltas, so a new revision adds only a
+    few lines to the repository. The .sqlite file changes in many places.
+    """
+    db = sqlite3.connect(args.db)
+    out = Path(args.sql)
+    with out.open("w", encoding="utf-8", newline="\n") as f:
+        f.write("-- Made by: uv run kb_revisions.py export\n")
+        f.write("-- Rebuild with: uv run kb_revisions.py import\n")
+        f.write("BEGIN TRANSACTION;\n")
+        f.write(SCHEMA.strip() + "\n")
+        for table in TABLES:
+            cols = [r[1] for r in db.execute(f"PRAGMA table_info({table})")]
+            values = " || ',' || ".join(f"quote({c})" for c in cols)
+            query = (f"SELECT 'INSERT INTO {table} ({', '.join(cols)}) VALUES (' "
+                     f"|| {values} || ');' FROM {table} ORDER BY revision_id")
+            count = 0
+            for (line,) in db.execute(query):
+                f.write(line + "\n")
+                count += 1
+            print(f"{table}: {count} rows", file=sys.stderr)
+        f.write("COMMIT;\n")
+    print(f"Wrote {out}.", file=sys.stderr)
+
+
+def import_sql(args: argparse.Namespace) -> None:
+    """Make the database from the SQL text that export wrote."""
+    db_path = Path(args.db)
+    if db_path.exists() and not args.force:
+        sys.exit(f"{db_path} exists. Use --force to replace it.")
+    tmp = db_path.with_suffix(".importing")
+    tmp.unlink(missing_ok=True)
+    db = sqlite3.connect(tmp)
+    db.executescript(Path(args.sql).read_text(encoding="utf-8"))
+    counts = {t: db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in TABLES}
+    db.close()
+    tmp.replace(db_path)
+    print(f"Wrote {db_path}: " + ", ".join(f"{t} {n} rows" for t, n in counts.items()),
+          file=sys.stderr)
+
+
 def report(args: argparse.Namespace) -> None:
     db = sqlite3.connect(args.db)
     rows = db.execute(
@@ -455,6 +504,15 @@ def main() -> None:
     r.add_argument("--approved-since", required=True, metavar="YYYY-MM-DD",
                    help="first review date to include")
     r.set_defaults(func=report)
+
+    e = sub.add_parser("export", help="write the database as SQL text for Git")
+    e.add_argument("--sql", default="kb_revisions.sql", help="SQL file (default: %(default)s)")
+    e.set_defaults(func=export)
+
+    i = sub.add_parser("import", help="make the database from the SQL text")
+    i.add_argument("--sql", default="kb_revisions.sql", help="SQL file (default: %(default)s)")
+    i.add_argument("--force", action="store_true", help="replace the database if it exists")
+    i.set_defaults(func=import_sql)
 
     args = parser.parse_args()
     args.func(args)

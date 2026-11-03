@@ -17,7 +17,7 @@ uv run kb_revisions.py scrape --headed                 # later runs, new revisio
 uv run kb_revisions.py report --approved-since 2026-06-01
 ```
 
-`--user` and `--locale` select the revisions list. The defaults are `rtanglao` and `en-US`. The database `kb_revisions.sqlite` is in Git. Git ignores the browser profile `.kb_revisions_browser/`.
+`--user` and `--locale` select the revisions list. The defaults are `rtanglao` and `en-US`. Git ignores the database `kb_revisions.sqlite` and the browser profile `.kb_revisions_browser/`. Git has `kb_revisions.sql`, a text copy of the database. After a `scrape` or `history` run, run `uv run kb_revisions.py export` and commit `kb_revisions.sql`. To make the database from a fresh clone, run `uv run kb_revisions.py import`.
 
 SUMO shows a Fastly puzzle to the Playwright browser. The script cannot solve it, so the user solves it in the `--headed` window. The script waits `--challenge-timeout` seconds (default 300) on the first page. The saved profile keeps the clearance between runs. Do not add code that hides automation from Fastly.
 
