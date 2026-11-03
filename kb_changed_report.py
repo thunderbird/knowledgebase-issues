@@ -24,6 +24,8 @@ Method:
 Examples:
     uv run kb_changed_report.py
     uv run kb_changed_report.py --user NAME --since 2026-06-01 --threshold 20
+    uv run kb_changed_report.py --exclude-created all --exclude new-thunderbird-desktop \
+        --suffix filtered
 """
 
 from __future__ import annotations
@@ -50,6 +52,9 @@ class ArticleChange:
     words_before: int
     words_after: int
     runs: int
+    slug: str = ""
+    created_by_user: bool = False
+    created_date: str = ""
 
     @property
     def percent(self) -> float:
@@ -127,10 +132,15 @@ def analyze(revisions: list[sqlite3.Row], user_url: str, since: str) -> ArticleC
         words_before=words_before or 0,
         words_after=len((last["source"] or "").split()),
         runs=len(runs),
+        slug=last["article_slug"],
+        created_by_user=mine(revisions[0]),
+        created_date=revisions[0]["created"][:10],
     )
 
 
-def load(db_path: str, user: str, since: str) -> list[ArticleChange]:
+def load(db_path: str, user: str, since: str, exclude_created: str = "none",
+         exclude_slugs: frozenset[str] = frozenset(),
+         threshold: float = 20.0) -> list[ArticleChange]:
     db = sqlite3.connect(db_path)
     db.row_factory = sqlite3.Row
     user_url = f"/user/{user}/"
@@ -152,19 +162,32 @@ def load(db_path: str, user: str, since: str) -> list[ArticleChange]:
         if (revisions[-1]["source"] or "").lstrip().upper().startswith("REDIRECT"):
             continue  # A redirect left after a rename. It is not an article.
         change = analyze(revisions, user_url, since)
-        if change:
-            changes.append(change)
+        if not change or slug in exclude_slugs:
+            continue
+        if change.created_by_user and exclude_created != "none":
+            new = change.created_date >= since
+            if exclude_created == "all":
+                continue
+            if exclude_created in ("since", "since-or-minor") and new:
+                continue
+            if exclude_created == "since-or-minor" and change.percent < threshold:
+                continue
+        changes.append(change)
     changes.sort(key=lambda c: (-c.percent, c.title.casefold()))
     return changes
 
 
-def to_markdown(changes, user, since, threshold) -> str:
+def to_markdown(changes, user, since, threshold, note="") -> str:
     lines = [
         f"# KB articles changed by {user} since {since}",
         "",
         f"Substantial means {threshold:g}% or more of the words changed. "
         "See issue #257 for the method.",
         "",
+    ]
+    if note:
+        lines += [note, ""]
+    lines += [
         "| Date | Article | Percent changed | Words added | Words removed | Substantial |",
         "| --- | --- | ---: | ---: | ---: | --- |",
     ]
@@ -178,7 +201,7 @@ def to_markdown(changes, user, since, threshold) -> str:
     return "\n".join(lines) + "\n"
 
 
-def to_html(changes, user, since, threshold) -> str:
+def to_html(changes, user, since, threshold, note="") -> str:
     rows = "\n".join(
         f"    <tr><td>{c.last_date}</td>"
         f'<td><a href="{html.escape(c.url)}">{html.escape(c.title)}</a></td>'
@@ -206,6 +229,7 @@ def to_html(changes, user, since, threshold) -> str:
 <h1>{html.escape(title)}</h1>
 <p>Substantial means {threshold:g}% or more of the words changed.
 Open this file in a browser, select the table, copy it, and paste it into Google Docs.</p>
+{f"<p>{html.escape(note)}</p>" if note else ""}
 <table>
   <thead><tr><th>Date</th><th>Article</th><th>Percent changed</th><th>Words added</th><th>Words removed</th><th>Substantial</th></tr></thead>
   <tbody>
@@ -229,6 +253,17 @@ def main() -> None:
                         help="first revision date to include (default: %(default)s)")
     parser.add_argument("--threshold", type=float, default=20.0,
                         help="percent changed that counts as substantial (default: %(default)s)")
+    parser.add_argument(
+        "--exclude-created", default="none",
+        choices=["none", "all", "since", "since-or-minor"],
+        help="leave out articles that the user created: none; all; since (created on or "
+             "after --since); since-or-minor (created on or after --since, or created "
+             "before it and not substantial). Default: %(default)s")
+    parser.add_argument("--exclude", action="append", default=[], metavar="SLUG",
+                        help="leave out this article, for example new-thunderbird-desktop "
+                             "(use the option again for more articles)")
+    parser.add_argument("--suffix", default="",
+                        help="text to add to the file names, for example filtered")
     parser.add_argument("--out-dir", default="reports",
                         help="folder for the report files (default: %(default)s)")
     args = parser.parse_args()
@@ -237,14 +272,27 @@ def main() -> None:
     if not Path(args.db).exists():
         sys.exit(f"{args.db} does not exist. Run kb_revisions.py scrape and history first.")
 
-    changes = load(args.db, args.user, args.since)
+    changes = load(args.db, args.user, args.since, args.exclude_created,
+                   frozenset(args.exclude), args.threshold)
+    notes = []
+    if args.exclude_created == "all":
+        notes.append(f"Articles that {args.user} created are left out.")
+    elif args.exclude_created == "since":
+        notes.append(f"Articles that {args.user} created on or after {args.since} are left out.")
+    elif args.exclude_created == "since-or-minor":
+        notes.append(f"Articles that {args.user} created on or after {args.since} are left out. "
+                     f"Articles that {args.user} created before {args.since} are included "
+                     f"only if they changed substantially.")
+    if args.exclude:
+        notes.append("These articles are left out: " + ", ".join(args.exclude) + ".")
+    note = " ".join(notes)
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    stem = f"{args.user}_changed_since_{args.since}"
+    stem = f"{args.user}_changed_since_{args.since}" + (f"_{args.suffix}" if args.suffix else "")
     (out / f"{stem}.md").write_text(
-        to_markdown(changes, args.user, args.since, args.threshold), encoding="utf-8")
+        to_markdown(changes, args.user, args.since, args.threshold, note), encoding="utf-8")
     (out / f"{stem}.html").write_text(
-        to_html(changes, args.user, args.since, args.threshold), encoding="utf-8")
+        to_html(changes, args.user, args.since, args.threshold, note), encoding="utf-8")
     count = sum(c.percent >= args.threshold for c in changes)
     print(f"{len(changes)} articles, {count} substantial. "
           f"Wrote {out / stem}.md and .html.", file=sys.stderr)
